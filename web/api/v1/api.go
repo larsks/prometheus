@@ -565,7 +565,7 @@ func (api *API) series(r *http.Request) apiFuncResult {
 		sets = append(sets, s)
 	}
 
-	set := storage.NewMergeSeriesSet(sets, nil)
+	set := storage.NewChainedMergeSeriesSet(sets, nil)
 	metrics := []labels.Labels{}
 	for set.Next() {
 		metrics = append(metrics, set.At().Labels())

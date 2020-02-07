@@ -16,6 +16,7 @@ package storage
 import (
 	"container/heap"
 	"context"
+	"math"
 	"sort"
 	"strings"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/tsdb/chunks"
 )
 
 type fanout struct {
@@ -223,7 +225,7 @@ func NewMergeQuerier(primaryQuerier Querier, queriers []Querier) Querier {
 // Select returns a set of series that matches the given label matchers.
 func (q *mergeQuerier) Select(params *SelectParams, matchers ...*labels.Matcher) (SeriesSet, Warnings, error) {
 	if len(q.queriers) != 1 {
-		// We need to sort for NewMergeSeriesSet to work.
+		// We need to sort for NewChainedMergeSeriesSet to work.
 		return q.SelectSorted(params, matchers...)
 	}
 	return q.queriers[0].Select(params, matchers...)
@@ -268,7 +270,7 @@ func (q *mergeQuerier) SelectSorted(params *SelectParams, matchers ...*labels.Ma
 	if priErr != nil {
 		return nil, nil, priErr
 	}
-	return NewMergeSeriesSet(seriesSets, q), warnings, nil
+	return NewChainedMergeSeriesSet(seriesSets, q), warnings, nil
 }
 
 // LabelValues returns all potential values for a label name.
@@ -386,21 +388,24 @@ func (q *mergeQuerier) Close() error {
 	return lastErr
 }
 
-// mergeSeriesSet implements SeriesSet
-type mergeSeriesSet struct {
+// MergeSeriesSet implements SeriesSet
+type MergeSeriesSet struct {
 	currentLabels labels.Labels
-	currentSets   []SeriesSet
-	heap          seriesSetHeap
-	sets          []SeriesSet
+	seriesMerger  SeriesMerger
 
-	querier *mergeQuerier
+	heap seriesSetHeap
+	sets []SeriesSet
+
+	currentSets []SeriesSet
+	querier     *mergeQuerier
 }
 
-// NewMergeSeriesSet returns a new series set that merges (deduplicates)
+// NewChainedMergeSeriesSet returns a new series set that merges (deduplicates)
 // series returned by the input series sets when iterating.
 // Each input series set must return its series in labels order, otherwise
 // merged series set will be incorrect.
-func NewMergeSeriesSet(sets []SeriesSet, querier *mergeQuerier) SeriesSet {
+// Overlapped samples/chunks will be dropped.
+func NewChainedMergeSeriesSet(sets []SeriesSet, querier *mergeQuerier) SeriesSet {
 	if len(sets) == 1 {
 		return sets[0]
 	}
@@ -416,14 +421,62 @@ func NewMergeSeriesSet(sets []SeriesSet, querier *mergeQuerier) SeriesSet {
 			heap.Push(&h, set)
 		}
 	}
-	return &mergeSeriesSet{
-		heap:    h,
-		sets:    sets,
-		querier: querier,
+	return &MergeSeriesSet{
+		seriesMerger: &chainSeriesMerger{},
+		heap:         h,
+		sets:         sets,
+		querier:      querier,
 	}
 }
 
-func (c *mergeSeriesSet) Next() bool {
+type SeriesMerger interface {
+	// NewMergedSeries returns merged series implementation that merges series with same labels together.
+	// It has to handle time-overlapped series as well.
+	NewMergedSeries(labels.Labels, ...Series) Series
+}
+
+type chainSeriesMerger struct{}
+
+// NewMergedSeries for chainSeriesMerger returns series implementation that allows iterating:
+// * over samples: in case of overlap they will be dropped.
+// * over chunks: in case of overlap they will be chained.
+func (m *chainSeriesMerger) NewMergedSeries(labels labels.Labels, s ...Series) Series {
+	return &chainSeries{
+		labels: labels,
+		series: s,
+	}
+}
+
+// NewChainedMergeSeriesSet returns a new series set that merges (deduplicates)
+// series returned by the input series sets when iterating.
+// Each input series set must return its series in labels order, otherwise
+// merged series set will be incorrect.
+// Overlapped samples/chunks will be dropped.
+func NewMergeSeriesSet(sets []SeriesSet, querier *mergeQuerier, seriesMerger SeriesMerger) SeriesSet {
+	if len(sets) == 1 {
+		return sets[0]
+	}
+
+	// Sets need to be pre-advanced, so we can introspect the label of the
+	// series under the cursor.
+	var h seriesSetHeap
+	for _, set := range sets {
+		if set == nil {
+			continue
+		}
+		if set.Next() {
+			heap.Push(&h, set)
+		}
+	}
+	return &MergeSeriesSet{
+		seriesMerger: seriesMerger,
+		heap:         h,
+		sets:         sets,
+		querier:      querier,
+	}
+}
+
+func (c *MergeSeriesSet) Next() bool {
 	// Run in a loop because the "next" series sets may not be valid anymore.
 	// If a remote querier fails, we discard all series sets from that querier.
 	// If, for the current label set, all the next series sets come from
@@ -460,21 +513,18 @@ func (c *mergeSeriesSet) Next() bool {
 	return true
 }
 
-func (c *mergeSeriesSet) At() Series {
+func (c *MergeSeriesSet) At() Series {
 	if len(c.currentSets) == 1 {
 		return c.currentSets[0].At()
 	}
-	series := []Series{}
+	series := make([]Series, 0, len(c.currentSets))
 	for _, seriesSet := range c.currentSets {
 		series = append(series, seriesSet.At())
 	}
-	return &mergeSeries{
-		labels: c.currentLabels,
-		series: series,
-	}
+	return c.seriesMerger.NewMergedSeries(c.currentLabels, series...)
 }
 
-func (c *mergeSeriesSet) Err() error {
+func (c *MergeSeriesSet) Err() error {
 	for _, set := range c.sets {
 		if err := set.Err(); err != nil {
 			return err
@@ -505,37 +555,39 @@ func (h *seriesSetHeap) Pop() interface{} {
 	return x
 }
 
-type mergeSeries struct {
+type chainSeries struct {
 	labels labels.Labels
 	series []Series
 }
 
-func (m *mergeSeries) Labels() labels.Labels {
+func (m *chainSeries) Labels() labels.Labels {
 	return m.labels
 }
 
-func (m *mergeSeries) Iterator() chunkenc.Iterator {
+func (m *chainSeries) SampleIterator() chunkenc.Iterator {
 	iterators := make([]chunkenc.Iterator, 0, len(m.series))
 	for _, s := range m.series {
-		iterators = append(iterators, s.Iterator())
+		iterators = append(iterators, s.SampleIterator())
 	}
-	return newMergeIterator(iterators)
+	return newChainSampleIterator(iterators)
 }
 
-type mergeIterator struct {
+// sampleIterator is responsible to iterate over non-overlapping samples from different iterators of same time series.
+// If the samples overlap, all but one will be dropped.
+type sampleIterator struct {
 	iterators []chunkenc.Iterator
-	h         seriesIteratorHeap
+	h         samplesIteratorHeap
 }
 
-func newMergeIterator(iterators []chunkenc.Iterator) chunkenc.Iterator {
-	return &mergeIterator{
+func newChainSampleIterator(iterators []chunkenc.Iterator) chunkenc.Iterator {
+	return &sampleIterator{
 		iterators: iterators,
 		h:         nil,
 	}
 }
 
-func (c *mergeIterator) Seek(t int64) bool {
-	c.h = seriesIteratorHeap{}
+func (c *sampleIterator) Seek(t int64) bool {
+	c.h = samplesIteratorHeap{}
 	for _, iter := range c.iterators {
 		if iter.Seek(t) {
 			heap.Push(&c.h, iter)
@@ -544,15 +596,15 @@ func (c *mergeIterator) Seek(t int64) bool {
 	return len(c.h) > 0
 }
 
-func (c *mergeIterator) At() (t int64, v float64) {
+func (c *sampleIterator) At() (t int64, v float64) {
 	if len(c.h) == 0 {
-		panic("mergeIterator.At() called after .Next() returned false.")
+		return math.MaxInt64, 0
 	}
 
 	return c.h[0].At()
 }
 
-func (c *mergeIterator) Next() bool {
+func (c *sampleIterator) Next() bool {
 	if c.h == nil {
 		for _, iter := range c.iterators {
 			if iter.Next() {
@@ -570,6 +622,7 @@ func (c *mergeIterator) Next() bool {
 	currt, _ := c.At()
 	for len(c.h) > 0 {
 		nextt, _ := c.h[0].At()
+		// All but one of the overlapping samples will be dropped.
 		if nextt != currt {
 			break
 		}
@@ -583,7 +636,7 @@ func (c *mergeIterator) Next() bool {
 	return len(c.h) > 0
 }
 
-func (c *mergeIterator) Err() error {
+func (c *sampleIterator) Err() error {
 	for _, iter := range c.iterators {
 		if err := iter.Err(); err != nil {
 			return err
@@ -592,22 +645,119 @@ func (c *mergeIterator) Err() error {
 	return nil
 }
 
-type seriesIteratorHeap []chunkenc.Iterator
+type samplesIteratorHeap []chunkenc.Iterator
 
-func (h seriesIteratorHeap) Len() int      { return len(h) }
-func (h seriesIteratorHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h samplesIteratorHeap) Len() int      { return len(h) }
+func (h samplesIteratorHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 
-func (h seriesIteratorHeap) Less(i, j int) bool {
+func (h samplesIteratorHeap) Less(i, j int) bool {
 	at, _ := h[i].At()
 	bt, _ := h[j].At()
 	return at < bt
 }
 
-func (h *seriesIteratorHeap) Push(x interface{}) {
+func (h *samplesIteratorHeap) Push(x interface{}) {
 	*h = append(*h, x.(chunkenc.Iterator))
 }
 
-func (h *seriesIteratorHeap) Pop() interface{} {
+func (h *samplesIteratorHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+func (m *chainSeries) ChunkIterator() chunks.Iterator {
+	iterators := make([]chunks.Iterator, 0, len(m.series))
+	for _, s := range m.series {
+		iterators = append(iterators, s.ChunkIterator())
+	}
+	return newChainChunkIterator(iterators)
+}
+
+// chainChunkIterator is responsible to iterate from non-overlapping chunks from different iterators of same time series.
+type chainChunkIterator struct {
+	iterators []chunks.Iterator
+	h         chunkIteratorHeap
+}
+
+func newChainChunkIterator(iterators []chunks.Iterator) chunks.Iterator {
+	return &chainChunkIterator{
+		iterators: iterators,
+		h:         nil,
+	}
+}
+
+//func (c *sampleIterator) Seek(t int64) bool {
+//	c.h = samplesIteratorHeap{}
+//	for _, iter := range c.iterators {
+//		if iter.Seek(t) {
+//			heap.Push(&c.h, iter)
+//		}
+//	}
+//	return len(c.h) > 0
+//}
+
+func (c *chainChunkIterator) At() chunks.Meta {
+	if len(c.h) == 0 {
+		return chunks.Meta{}
+	}
+
+	return c.h[0].At()
+}
+
+func (c *chainChunkIterator) Next() bool {
+	if c.h == nil {
+		for _, iter := range c.iterators {
+			if iter.Next() {
+				heap.Push(&c.h, iter)
+			}
+		}
+
+		return len(c.h) > 0
+	}
+
+	if len(c.h) == 0 {
+		return false
+	}
+
+	// Overlapped chunks will be just chained.
+	iter := heap.Pop(&c.h).(chunks.Iterator)
+	if iter.Next() {
+		heap.Push(&c.h, iter)
+	}
+	return len(c.h) > 0
+}
+
+func (c *chainChunkIterator) Err() error {
+	for _, iter := range c.iterators {
+		if err := iter.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type chunkIteratorHeap []chunks.Iterator
+
+func (h chunkIteratorHeap) Len() int      { return len(h) }
+func (h chunkIteratorHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h chunkIteratorHeap) Less(i, j int) bool {
+	at := h[i].At()
+	bt := h[j].At()
+	if at.MinTime == bt.MinTime {
+		return at.MaxTime < bt.MaxTime
+	}
+	return at.MinTime < bt.MinTime
+}
+
+func (h *chunkIteratorHeap) Push(x interface{}) {
+	*h = append(*h, x.(chunks.Iterator))
+}
+
+func (h *chunkIteratorHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	x := old[n-1]

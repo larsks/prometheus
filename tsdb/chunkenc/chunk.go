@@ -72,7 +72,6 @@ type Appender interface {
 	Append(int64, float64)
 }
 
-// Iterator is a simple iterator that can only get the next value.
 // Iterator iterates over the samples of a time series.
 type Iterator interface {
 	// Next advances the iterator by one.

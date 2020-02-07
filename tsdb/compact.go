@@ -650,7 +650,7 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 	}
 
 	var (
-		set         storage.ChunkSeriesSet
+		sets        []storage.SeriesSet
 		symbols     index.StringIter
 		closers     = []io.Closer{}
 		overlapping bool
@@ -708,18 +708,14 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 		}
 		all = indexr.SortedPostings(all)
 
-		s := newCompactionSeriesSet(indexr, chunkr, tombsr, all)
+		s := newBlockSeriesSet(indexr, chunkr, tombsr, all)
 		syms := indexr.Symbols()
 
 		if i == 0 {
-			set = s
 			symbols = syms
 			continue
 		}
-		set, err = newCompactionMerger(set, s)
-		if err != nil {
-			return err
-		}
+		sets = append(sets, s)
 		symbols = newMergedStringIter(symbols, syms)
 	}
 
@@ -734,6 +730,14 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 
 	delIter := &deletedIterator{}
 	ref := uint64(0)
+
+	var set storage.SeriesSet
+	if overlapping {
+		set = storage.NewMergeSeriesSet(sets, nil)
+	} else {
+		set = storage.NewChainedMergeSeriesSet(sets, nil)
+	}
+
 	for set.Next() {
 		select {
 		case <-c.ctx.Done():
@@ -842,7 +846,9 @@ func (c *LeveledCompactor) populateBlock(blocks []BlockReader, meta *BlockMeta, 
 	return nil
 }
 
-type compactionSeriesSet struct {
+var _ storage.SeriesSet = &blockSeriesSet{}
+
+type blockSeriesSet struct {
 	p          index.Postings
 	index      IndexReader
 	chunks     ChunkReader
@@ -854,8 +860,8 @@ type compactionSeriesSet struct {
 	err       error
 }
 
-func newCompactionSeriesSet(i IndexReader, c ChunkReader, t tombstones.Reader, p index.Postings) *compactionSeriesSet {
-	return &compactionSeriesSet{
+func newBlockSeriesSet(i IndexReader, c ChunkReader, t tombstones.Reader, p index.Postings) *blockSeriesSet {
+	return &blockSeriesSet{
 		index:      i,
 		chunks:     c,
 		tombstones: t,
@@ -863,7 +869,7 @@ func newCompactionSeriesSet(i IndexReader, c ChunkReader, t tombstones.Reader, p
 	}
 }
 
-func (c *compactionSeriesSet) Next() bool {
+func (b *blockSeriesSet) Next() bool {
 	if !c.p.Next() {
 		return false
 	}
@@ -895,6 +901,7 @@ func (c *compactionSeriesSet) Next() bool {
 	for i := range c.c {
 		chk := &c.c[i]
 
+		// Populate only later on.
 		chk.Chunk, err = c.chunks.Chunk(chk.Ref)
 		if err != nil {
 			c.err = errors.Wrapf(err, "chunk %d not found", chk.Ref)
@@ -905,102 +912,23 @@ func (c *compactionSeriesSet) Next() bool {
 	return true
 }
 
-func (c *compactionSeriesSet) Err() error {
-	if c.err != nil {
-		return c.err
+func (b *blockSeriesSet) Err() error {
+	if b.err != nil {
+		return b.err
 	}
-	return c.p.Err()
+	return b.p.Err()
 }
 
-func (c *compactionSeriesSet) At() (labels.Labels, []chunks.Meta, tombstones.Intervals) {
-	return c.l, c.c, c.intervals
+func (b *blockSeriesSet) At() storage.Series {
+	return c.l, c.c, c.intervals // TODO
 }
 
-type compactionMerger struct {
-	a, b storage.ChunkSeriesSet
+type verticalSeriesMerger struct{}
 
-	aok, bok  bool
-	l         labels.Labels
-	c         []chunks.Meta
-	intervals tombstones.Intervals
-}
-
-func newCompactionMerger(a, b storage.ChunkSeriesSet) (*compactionMerger, error) {
-	c := &compactionMerger{
-		a: a,
-		b: b,
+func (m *verticalSeriesMerger) NewMergedSeries(labels labels.Labels, s ...Series) Series {
+	return &verticalChainedSeries{
+		series: s,
 	}
-	// Initialize first elements of both sets as Next() needs
-	// one element look-ahead.
-	c.aok = c.a.Next()
-	c.bok = c.b.Next()
-
-	return c, c.Err()
-}
-
-func (c *compactionMerger) compare() int {
-	if !c.aok {
-		return 1
-	}
-	if !c.bok {
-		return -1
-	}
-	a, _, _ := c.a.At()
-	b, _, _ := c.b.At()
-	return labels.Compare(a, b)
-}
-
-func (c *compactionMerger) Next() bool {
-	if !c.aok && !c.bok || c.Err() != nil {
-		return false
-	}
-	// While advancing child iterators the memory used for labels and chunks
-	// may be reused. When picking a series we have to store the result.
-	var lset labels.Labels
-	var chks []chunks.Meta
-
-	d := c.compare()
-	if d > 0 {
-		lset, chks, c.intervals = c.b.At()
-		c.l = append(c.l[:0], lset...)
-		c.c = append(c.c[:0], chks...)
-
-		c.bok = c.b.Next()
-	} else if d < 0 {
-		lset, chks, c.intervals = c.a.At()
-		c.l = append(c.l[:0], lset...)
-		c.c = append(c.c[:0], chks...)
-
-		c.aok = c.a.Next()
-	} else {
-		// Both sets contain the current series. Chain them into a single one.
-		l, ca, ra := c.a.At()
-		_, cb, rb := c.b.At()
-
-		for _, r := range rb {
-			ra = ra.Add(r)
-		}
-
-		c.l = append(c.l[:0], l...)
-		c.c = append(append(c.c[:0], ca...), cb...)
-		c.intervals = ra
-
-		c.aok = c.a.Next()
-		c.bok = c.b.Next()
-	}
-
-	return true
-}
-
-func (c *compactionMerger) Err() error {
-	if c.a.Err() != nil {
-		return c.a.Err()
-	}
-	return c.b.Err()
-}
-
-func (c *compactionMerger) At() (labels.Labels, []chunks.Meta, tombstones.Intervals) {
-	return c.l, c.c, c.intervals
 }
 
 func newMergedStringIter(a index.StringIter, b index.StringIter) index.StringIter {

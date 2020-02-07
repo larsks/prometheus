@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
-	"github.com/prometheus/prometheus/tsdb/tombstones"
 )
 
 // The errors exposed.
@@ -124,13 +123,6 @@ type Appender interface {
 	Rollback() error
 }
 
-// SeriesSet contains a set of series.
-type SeriesSet interface {
-	Next() bool
-	At() Series
-	Err() error
-}
-
 var emptySeriesSet = errSeriesSet{}
 
 // EmptySeriesSet returns a series set that's always empty.
@@ -146,22 +138,23 @@ func (s errSeriesSet) Next() bool { return false }
 func (s errSeriesSet) At() Series { return nil }
 func (s errSeriesSet) Err() error { return s.err }
 
-// Series represents a single time series.
+// SeriesSet contains a set of series.
+type SeriesSet interface {
+	Next() bool
+	At() Series
+	Err() error
+}
+
+// Series exposes a single time series and allows over samples or chunks.
 type Series interface {
 	// Labels returns the complete set of labels identifying the series.
 	Labels() labels.Labels
 
-	// Iterator returns a new iterator of the data of the series.
-	Iterator() chunkenc.Iterator
-}
+	// SampleIterator returns a new iterator of the data of the series.
+	SampleIterator() chunkenc.Iterator
 
-// ChunkSeriesSet exposes the chunks and intervals of a series instead of the
-// actual series itself.
-// TODO(bwplotka): Move it to Series liike Iterator that iterates over chunks and avoiding loading all of them at once.
-type ChunkSeriesSet interface {
-	Next() bool
-	At() (labels.Labels, []chunks.Meta, tombstones.Intervals)
-	Err() error
+	// ChunkIterator returns a new iterator that iterates over non-overlapping chunks of the series.
+	ChunkIterator() chunks.Iterator
 }
 
 type Warnings []error
