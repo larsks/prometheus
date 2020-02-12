@@ -87,6 +87,10 @@ func query(t testing.TB, q storage.Querier, matchers ...*labels.Matcher) map[str
 		}
 		testutil.Ok(t, it.Err())
 
+		if len(samples) == 0 {
+			continue
+		}
+
 		name := series.Labels().String()
 		result[name] = samples
 	}
@@ -2475,6 +2479,133 @@ func TestDBReadOnly_FlushWAL(t *testing.T) {
 	}
 	testutil.Ok(t, seriesSet.Err())
 	testutil.Equals(t, 1000.0, sum)
+}
+
+func TestDBCannotSeePartialCommits(t *testing.T) {
+	tmpdir, _ := ioutil.TempDir("", "test")
+	defer os.RemoveAll(tmpdir)
+
+	db, err := Open(tmpdir, nil, nil, nil)
+	testutil.Ok(t, err)
+	defer db.Close()
+
+	stop := make(chan struct{})
+	firstInsert := make(chan struct{})
+
+	// Insert data in batches.
+	go func() {
+		iter := 0
+		for {
+			app := db.Appender()
+
+			for j := 0; j < 100; j++ {
+				_, err := app.Add(labels.FromStrings("foo", "bar", "a", strconv.Itoa(j)), int64(iter), float64(iter))
+				testutil.Ok(t, err)
+			}
+			err = app.Commit()
+			testutil.Ok(t, err)
+
+			if iter == 0 {
+				close(firstInsert)
+			}
+			iter++
+
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}()
+
+	<-firstInsert
+
+	// This is a race condition, so do a few tests to tickle it.
+	// Usually most will fail.
+	inconsistencies := 0
+	for i := 0; i < 10; i++ {
+		func() {
+			querier, err := db.Querier(0, 1000000)
+			testutil.Ok(t, err)
+			defer querier.Close()
+
+			ss, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+			testutil.Ok(t, err)
+
+			seriesSet := readSeriesSet(t, ss)
+
+			testutil.Ok(t, err)
+			values := map[float64]struct{}{}
+			for _, series := range seriesSet {
+				values[series[len(series)-1].v] = struct{}{}
+			}
+			if len(values) != 1 {
+				inconsistencies++
+			}
+		}()
+	}
+	stop <- struct{}{}
+
+	testutil.Equals(t, 0, inconsistencies, "Some queries saw inconsistent results.")
+}
+
+func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
+	tmpdir, _ := ioutil.TempDir("", "test")
+	defer os.RemoveAll(tmpdir)
+
+	db, err := Open(tmpdir, nil, nil, nil)
+	testutil.Ok(t, err)
+	defer db.Close()
+
+	querier, err := db.Querier(0, 1000000)
+	testutil.Ok(t, err)
+	defer querier.Close()
+
+	app := db.Appender()
+	_, err = app.Add(labels.FromStrings("foo", "bar"), 0, 0)
+	testutil.Ok(t, err)
+	// This commit is after the querier is created, so should not be returned.
+	err = app.Commit()
+	testutil.Ok(t, err)
+
+	ss, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+	testutil.Ok(t, err)
+
+	seriesSet := readSeriesSet(t, ss)
+	testutil.Equals(t, map[string][]sample{}, seriesSet)
+
+	querier, err = db.Querier(0, 1000000)
+	testutil.Ok(t, err)
+	defer querier.Close()
+
+	ss, err = querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+	testutil.Ok(t, err)
+
+	seriesSet = readSeriesSet(t, ss)
+	testutil.Equals(t, seriesSet, map[string][]sample{`{foo="bar"}`: []sample{{t: 0, v: 0}}})
+}
+
+func readSeriesSet(t *testing.T, ss SeriesSet) map[string][]sample {
+	seriesSet := make(map[string][]sample)
+	for ss.Next() {
+		series := ss.At()
+
+		samples := []sample{}
+		it := series.Iterator()
+		for it.Next() {
+			t, v := it.At()
+			samples = append(samples, sample{t: t, v: v})
+		}
+		if len(samples) == 0 {
+			continue
+		}
+
+		name := series.Labels().String()
+		seriesSet[name] = samples
+	}
+	testutil.Ok(t, ss.Err())
+
+	return seriesSet
 }
 
 // TestChunkWriter_ReadAfterWrite ensures that chunk segment are cut at the set segment size and
