@@ -2525,11 +2525,11 @@ func TestDBCannotSeePartialCommits(t *testing.T) {
 	inconsistencies := 0
 	for i := 0; i < 10; i++ {
 		func() {
-			querier, err := db.Querier(0, 1000000)
+			querier, err := db.Querier(context.Background(), 0, 1000000)
 			testutil.Ok(t, err)
 			defer querier.Close()
 
-			ss, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+			ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 			testutil.Ok(t, err)
 
 			seriesSet := readSeriesSet(t, ss)
@@ -2557,7 +2557,7 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	testutil.Ok(t, err)
 	defer db.Close()
 
-	querier, err := db.Querier(0, 1000000)
+	querier, err := db.Querier(context.Background(), 0, 1000000)
 	testutil.Ok(t, err)
 	defer querier.Close()
 
@@ -2568,24 +2568,24 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	err = app.Commit()
 	testutil.Ok(t, err)
 
-	ss, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+	ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
 	seriesSet := readSeriesSet(t, ss)
 	testutil.Equals(t, map[string][]sample{}, seriesSet)
 
-	querier, err = db.Querier(0, 1000000)
+	querier, err = db.Querier(context.Background(), 0, 1000000)
 	testutil.Ok(t, err)
 	defer querier.Close()
 
-	ss, err = querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+	ss, _, err = querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
 	seriesSet = readSeriesSet(t, ss)
 	testutil.Equals(t, seriesSet, map[string][]sample{`{foo="bar"}`: []sample{{t: 0, v: 0}}})
 }
 
-func readSeriesSet(t *testing.T, ss SeriesSet) map[string][]sample {
+func readSeriesSet(t *testing.T, ss storage.SeriesSet) map[string][]sample {
 	seriesSet := make(map[string][]sample)
 	for ss.Next() {
 		series := ss.At()

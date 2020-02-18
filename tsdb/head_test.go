@@ -1444,7 +1444,7 @@ func TestMemSeriesIsolation(t *testing.T) {
 		testutil.Ok(t, err)
 		defer querier.Close()
 
-		ss, err := querier.Select(labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
+		ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 		testutil.Ok(t, err)
 
 		seriesSet := readSeriesSet(t, ss)
@@ -1456,7 +1456,7 @@ func TestMemSeriesIsolation(t *testing.T) {
 
 	i := 0
 	for ; i <= 1000; i++ {
-		var app Appender
+		var app storage.Appender
 		// To initialize bounds.
 		if hb.MinTime() == math.MaxInt64 {
 			t.Log("new")
