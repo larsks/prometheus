@@ -1956,16 +1956,17 @@ func (s *memSeries) iterator(id int, isoState *IsolationState, it chunkenc.Itera
 		it := s.txs.iterator()
 		for index := 0; index < writeIDsToConsider; index++ {
 			writeID := it.At()
-			if _, ok := isoState.incompleteWrites[writeID]; ok || writeID > isoState.maxWriteID {
-				// If found limit the number of samples being iterated over.
-				stopAfter = numSamples - (writeIDsToConsider - index)
-
-				if stopAfter < 0 {
-					stopAfter = 0 // Stopped in a previous chunk.
+			if writeID <= isoState.maxWriteID { // Easy check first.
+				if _, ok := isoState.incompleteWrites[writeID]; !ok {
+					it.Next()
+					continue
 				}
-				break
 			}
-			it.Next()
+			stopAfter = numSamples - (writeIDsToConsider - index)
+			if stopAfter < 0 {
+				stopAfter = 0 // Stopped in a previous chunk.
+			}
+			break
 		}
 	}
 

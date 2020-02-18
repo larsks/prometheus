@@ -2533,8 +2533,6 @@ func TestDBCannotSeePartialCommits(t *testing.T) {
 			testutil.Ok(t, err)
 
 			seriesSet := readSeriesSet(t, ss)
-
-			testutil.Ok(t, err)
 			values := map[float64]struct{}{}
 			for _, series := range seriesSet {
 				values[series[len(series)-1].v] = struct{}{}
