@@ -33,9 +33,9 @@ type IsolationState struct {
 // Close closes the state.
 func (i *IsolationState) Close() {
 	i.isolation.readMtx.Lock()
+	defer i.isolation.readMtx.Unlock()
 	i.next.prev = i.prev
 	i.prev.next = i.next
-	i.isolation.readMtx.Unlock()
 }
 
 // isolation is the global isolation state.
@@ -108,18 +108,16 @@ func (i *isolation) State() *IsolationState {
 // newWriteID increments the transaction counter and returns a new transaction ID.
 func (i *isolation) newWriteID() uint64 {
 	i.writeMtx.Lock()
+	defer i.writeMtx.Unlock()
 	i.lastWriteID++
-	writeID := i.lastWriteID
-	i.writesOpen[writeID] = struct{}{}
-	i.writeMtx.Unlock()
-
-	return writeID
+	i.writesOpen[i.lastWriteID] = struct{}{}
+	return i.lastWriteID
 }
 
 func (i *isolation) closeWrite(writeID uint64) {
 	i.writeMtx.Lock()
+	defer i.writeMtx.Unlock()
 	delete(i.writesOpen, writeID)
-	i.writeMtx.Unlock()
 }
 
 // The transactionID ring buffer.
