@@ -1280,19 +1280,29 @@ func TestNotMatcherSelectsLabelsUnsetSeries(t *testing.T) {
 		testutil.Ok(t, err)
 		testutil.Equals(t, 0, len(ws))
 
-		lres, err := expandSeriesSet(ss)
+		ess, err := expandSeriesSet(ss)
 		testutil.Ok(t, err)
 
-		testutil.Equals(t, c.series, lres)
+		testutil.Equals(t, len(c.series), len(ess))
+		for _, ll := range c.series {
+			_, ok := ess[ll.String()]
+			testutil.Assert(t, ok, "expected series %s not found in result", ll.String())
+		}
 	}
 }
 
-func expandSeriesSet(ss storage.SeriesSet) ([]labels.Labels, error) {
-	result := []labels.Labels{}
+func expandSeriesSet(ss storage.SeriesSet) (map[string][]sample, error) {
+	result := map[string][]sample{}
 	for ss.Next() {
-		result = append(result, ss.At().Labels())
+		series := ss.At()
+		samples := []sample{}
+		it := series.Iterator()
+		for it.Next() {
+			t, v := it.At()
+			samples = append(samples, sample{t: t, v: v})
+		}
+		result[series.Labels().String()] = samples
 	}
-
 	return result, ss.Err()
 }
 
@@ -2532,7 +2542,8 @@ func TestDBCannotSeePartialCommits(t *testing.T) {
 			ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 			testutil.Ok(t, err)
 
-			seriesSet := readSeriesSet(t, ss)
+			seriesSet, err := expandSeriesSet(ss)
+			testutil.Ok(t, err)
 			values := map[float64]struct{}{}
 			for _, series := range seriesSet {
 				values[series[len(series)-1].v] = struct{}{}
@@ -2569,7 +2580,8 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
-	seriesSet := readSeriesSet(t, ss)
+	seriesSet, err := expandSeriesSet(ss)
+	testutil.Ok(t, err)
 	testutil.Equals(t, map[string][]sample{}, seriesSet)
 
 	querier, err = db.Querier(context.Background(), 0, 1000000)
@@ -2579,31 +2591,9 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	ss, _, err = querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
-	seriesSet = readSeriesSet(t, ss)
+	seriesSet, err = expandSeriesSet(ss)
+	testutil.Ok(t, err)
 	testutil.Equals(t, seriesSet, map[string][]sample{`{foo="bar"}`: []sample{{t: 0, v: 0}}})
-}
-
-func readSeriesSet(t *testing.T, ss storage.SeriesSet) map[string][]sample {
-	seriesSet := make(map[string][]sample)
-	for ss.Next() {
-		series := ss.At()
-
-		samples := []sample{}
-		it := series.Iterator()
-		for it.Next() {
-			t, v := it.At()
-			samples = append(samples, sample{t: t, v: v})
-		}
-		if len(samples) == 0 {
-			continue
-		}
-
-		name := series.Labels().String()
-		seriesSet[name] = samples
-	}
-	testutil.Ok(t, ss.Err())
-
-	return seriesSet
 }
 
 // TestChunkWriter_ReadAfterWrite ensures that chunk segment are cut at the set segment size and
