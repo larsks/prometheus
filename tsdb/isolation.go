@@ -167,30 +167,6 @@ func (txr *txRing) cleanupWriteIDsBelow(bound uint64) {
 	txr.txIDFirst %= len(txr.txIDs)
 }
 
-// cutoffN will only keep the latest N transactions in the ring.
-// Will also downsize the ring if possible.
-func (txr *txRing) cutoffN(n int) {
-	if txr.txIDCount <= n {
-		return
-	}
-
-	txr.txIDFirst = (txr.txIDFirst + txr.txIDCount - n) % len(txr.txIDs)
-	txr.txIDCount = n
-
-	newBufSize := len(txr.txIDs)
-	for n >= newBufSize/2 {
-		return
-	}
-	newBufSize /= 2
-
-	newRing := make([]uint64, newBufSize)
-	idx := copy(newRing[:], txr.txIDs[txr.txIDFirst:])
-	copy(newRing[idx:], txr.txIDs[:txr.txIDFirst])
-
-	txr.txIDs = newRing
-	txr.txIDFirst = 0
-}
-
 func (txr *txRing) iterator() *txRingIterator {
 	return &txRingIterator{
 		pos: txr.txIDFirst,

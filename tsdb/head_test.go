@@ -1512,35 +1512,3 @@ func TestMemSeriesIsolation(t *testing.T) {
 	testutil.Equals(t, 1002, lastValue(1002))
 	testutil.Equals(t, 1002, lastValue(1003))
 }
-
-func TestHead_Truncate_WriteIDs(t *testing.T) {
-	h, err := NewHead(nil, nil, nil, 1000, DefaultStripeSize)
-	testutil.Ok(t, err)
-	defer h.Close()
-
-	h.initTime(0)
-
-	s1, _ := h.getOrCreate(1, labels.FromStrings("a", "1", "b", "1"))
-
-	chk := chunkenc.NewXORChunk()
-	app, err := chk.Appender()
-	testutil.Ok(t, err)
-
-	app.Append(1, 0)
-	app.Append(2, 0)
-	app.Append(3, 0)
-
-	s1.chunks = []*memChunk{
-		{minTime: 0, maxTime: 999, chunk: chk},
-		{minTime: 1000, maxTime: 1999, chunk: chk},
-	}
-
-	s1.txs.txIDs = []uint64{2, 3, 4, 5, 0, 0, 0, 1}
-	s1.txs.txIDFirst = 7
-	s1.txs.txIDCount = 5
-
-	testutil.Ok(t, h.Truncate(1000))
-	testutil.Equals(t, []uint64{3, 4, 5, 0}, s1.txs.txIDs)
-	testutil.Equals(t, 0, s1.txs.txIDFirst)
-	testutil.Equals(t, 3, s1.txs.txIDCount)
-}
