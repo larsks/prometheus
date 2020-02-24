@@ -1447,7 +1447,7 @@ func TestMemSeriesIsolation(t *testing.T) {
 		ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 		testutil.Ok(t, err)
 
-		seriesSet, err := expandSeriesSet(ss)
+		_, seriesSet, err := expandSeriesSet(ss)
 		testutil.Ok(t, err)
 		for _, series := range seriesSet {
 			return int(series[len(series)-1].v)

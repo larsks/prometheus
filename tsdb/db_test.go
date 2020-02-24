@@ -1280,19 +1280,17 @@ func TestNotMatcherSelectsLabelsUnsetSeries(t *testing.T) {
 		testutil.Ok(t, err)
 		testutil.Equals(t, 0, len(ws))
 
-		ess, err := expandSeriesSet(ss)
+		lres, _, err := expandSeriesSet(ss)
 		testutil.Ok(t, err)
-
-		testutil.Equals(t, len(c.series), len(ess))
-		for _, ll := range c.series {
-			_, ok := ess[ll.String()]
-			testutil.Assert(t, ok, "expected series %s not found in result", ll.String())
-		}
+		testutil.Equals(t, c.series, lres)
 	}
 }
 
-func expandSeriesSet(ss storage.SeriesSet) (map[string][]sample, error) {
-	result := map[string][]sample{}
+// expandSeriesSet returns the raw labels in the order they are retrieved from
+// the series set and the samples keyed by Labels().String().
+func expandSeriesSet(ss storage.SeriesSet) ([]labels.Labels, map[string][]sample, error) {
+	resultLabels := []labels.Labels{}
+	resultSamples := map[string][]sample{}
 	for ss.Next() {
 		series := ss.At()
 		samples := []sample{}
@@ -1301,9 +1299,10 @@ func expandSeriesSet(ss storage.SeriesSet) (map[string][]sample, error) {
 			t, v := it.At()
 			samples = append(samples, sample{t: t, v: v})
 		}
-		result[series.Labels().String()] = samples
+		resultLabels = append(resultLabels, series.Labels())
+		resultSamples[series.Labels().String()] = samples
 	}
-	return result, ss.Err()
+	return resultLabels, resultSamples, ss.Err()
 }
 
 func TestOverlappingBlocksDetectsAllOverlaps(t *testing.T) {
@@ -2542,7 +2541,7 @@ func TestDBCannotSeePartialCommits(t *testing.T) {
 			ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 			testutil.Ok(t, err)
 
-			seriesSet, err := expandSeriesSet(ss)
+			_, seriesSet, err := expandSeriesSet(ss)
 			testutil.Ok(t, err)
 			values := map[float64]struct{}{}
 			for _, series := range seriesSet {
@@ -2580,7 +2579,7 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	ss, _, err := querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
-	seriesSet, err := expandSeriesSet(ss)
+	_, seriesSet, err := expandSeriesSet(ss)
 	testutil.Ok(t, err)
 	testutil.Equals(t, map[string][]sample{}, seriesSet)
 
@@ -2591,7 +2590,7 @@ func TestDBQueryDoesntSeeAppendsAfterCreation(t *testing.T) {
 	ss, _, err = querier.Select(nil, labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"))
 	testutil.Ok(t, err)
 
-	seriesSet, err = expandSeriesSet(ss)
+	_, seriesSet, err = expandSeriesSet(ss)
 	testutil.Ok(t, err)
 	testutil.Equals(t, seriesSet, map[string][]sample{`{foo="bar"}`: []sample{{t: 0, v: 0}}})
 }

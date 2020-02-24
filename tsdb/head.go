@@ -215,13 +215,13 @@ func newHeadMetrics(h *Head, r prometheus.Registerer) *headMetrics {
 	})
 	m.lowWatermark = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "prometheus_tsdb_isolation_low_watermark",
-		Help: "The lowest write ID that is still referenced.",
+		Help: "The lowest TSDB write ID that is still referenced.",
 	}, func() float64 {
 		return float64(h.iso.lowWatermark())
 	})
 	m.highWatermark = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "prometheus_tsdb_isolation_high_watermark",
-		Help: "The highest write ID that has been given out.",
+		Help: "The highest TSDB write ID that has been given out.",
 	}, func() float64 {
 		h.iso.writeMtx.Lock()
 		defer h.iso.writeMtx.Unlock()
@@ -1853,7 +1853,8 @@ func (s *memSeries) truncateChunksBefore(mint int64) (removed int) {
 	return k
 }
 
-// append adds the sample (t, v) to the series.
+// append adds the sample (t, v) to the series. The caller also has to provide
+// the writeID for isolation.
 func (s *memSeries) append(t int64, v float64, writeID uint64) (success, chunkCreated bool) {
 	// Based on Gorilla white papers this offers near-optimal compression ratio
 	// so anything bigger that this has diminishing returns and increases
