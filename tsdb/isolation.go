@@ -40,7 +40,7 @@ func (i *IsolationState) Close() {
 
 // isolation is the global isolation state.
 type isolation struct {
-	// Mutex for accessing writeLastId and writesOpen.
+	// Mutex for accessing lastWriteId and writesOpen.
 	writeMtx sync.Mutex
 	// Each write is given an internal id.
 	lastWriteID uint64

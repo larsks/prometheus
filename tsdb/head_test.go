@@ -1427,7 +1427,7 @@ func TestMemSeriesIsolation(t *testing.T) {
 	defer hb.Close()
 
 	lastValue := func(maxWriteId uint64) int {
-		idx, err := hb.Index()
+		idx, err := hb.Index(hb.MinTime(), hb.MaxTime())
 		testutil.Ok(t, err)
 
 		iso := hb.iso.State()
